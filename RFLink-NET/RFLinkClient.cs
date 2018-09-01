@@ -45,6 +45,8 @@ namespace RFLinkNet
         private LibraryStatus libraryStatus = LibraryStatus.NotReady;
         private ManualResetEvent statusReceived = new ManualResetEvent(false);
         private ManualResetEvent versionReceived = new ManualResetEvent(false);
+        private ManualResetEvent pingReceived = new ManualResetEvent(false);
+
 
         protected void ReturnStdOut(string text)
         {
@@ -105,6 +107,20 @@ namespace RFLinkNet
             Dispose(false);
         }
 
+        public bool Ping()
+        {
+            SendRawData(Commands.ConstructPacket("PING"));
+
+            if (pingReceived.WaitOne(TimeSpan.FromSeconds(3)))
+            {
+                pingReceived.Reset();
+                return true;
+            }
+
+            pingReceived.Reset();
+            return false;
+        }
+
         /// <summary>
         /// Send data to the RFLink serial port
         /// No data will be manipulated 
@@ -123,8 +139,6 @@ namespace RFLinkNet
                     Thread.Sleep(50 + i);
                 }
             }
-
-            ReturnStdOut($"Sent ({repeat}):{data}");
         }
 
         public void Close()
@@ -203,6 +217,10 @@ namespace RFLinkNet
                     {
                         Settings.ProcessVerResponse(rf);
                         versionReceived.Set();
+                    }
+                    else if (rf.Protocol == "PONG")
+                    {
+                        pingReceived.Set();
                     }
                     else if (libraryStatus == LibraryStatus.Ready)
                     {
