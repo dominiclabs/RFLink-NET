@@ -50,12 +50,47 @@ namespace RFLinkNet
 
         protected void ReturnStdOut(string text)
         {
-            EventLogOut?.Invoke(this, new RFEventArgs { Data = text });
+            var data = new RFEventArgs { Data = text };
+
+            if (EventLogOut != null)
+            {
+                var eventListeners = EventLogOut.GetInvocationList();
+
+                for (int index = 0; index < eventListeners.Count(); index++)
+                {
+                    var methodToInvoke = (EventHandler)eventListeners[index];
+                    methodToInvoke.BeginInvoke(this, data, EndAsyncEvent, null);
+                }
+            }
         }
 
         protected void ReturnRFOutput(RFData data)
         {
-            EventRFOut?.Invoke(this, data);
+            if (EventRFOut != null)
+            {
+                var eventListeners = EventRFOut.GetInvocationList();
+
+                for (int index = 0; index < eventListeners.Count(); index++)
+                {
+                    var methodToInvoke = (EventHandler)eventListeners[index];
+                    methodToInvoke.BeginInvoke(this, data, EndAsyncEvent, null);
+                }
+            }
+        }
+
+        private void EndAsyncEvent(IAsyncResult iar)
+        {
+            var ar = (System.Runtime.Remoting.Messaging.AsyncResult)iar;
+            var invokedMethod = (EventHandler)ar.AsyncDelegate;
+
+            try
+            {
+                invokedMethod.EndInvoke(iar);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine("An event listener threw an unexpected exception: {0}", e.Message);
+            }
         }
 
         /// <summary>
@@ -87,8 +122,10 @@ namespace RFLinkNet
             serialPort.DataBits = 8;
             serialPort.StopBits = StopBits.One;
             serialPort.Parity = Parity.None;
-
-            serialPort.DataReceived += SerialPort_DataReceived;
+            serialPort.WriteTimeout = 500;
+            serialPort.ReadTimeout = 500;
+            serialPort.RtsEnable = true;
+            serialPort.DataReceived += new SerialDataReceivedEventHandler(SerialPort_DataReceived);            
         }
 
         /// <summary>
@@ -98,27 +135,37 @@ namespace RFLinkNet
         public RFLinkClient(SerialPort serialPort)
         {
             this.serialPort = serialPort ?? throw new ArgumentNullException();
-            serialPort.DataReceived += SerialPort_DataReceived;
+            serialPort.DataReceived += new SerialDataReceivedEventHandler(SerialPort_DataReceived);
         }
 
         ~RFLinkClient()
         {
-            Close();
-            Dispose(false);
+            try
+            {
+                Close();
+                Dispose(false);
+
+            }
+            catch
+            {
+                // We tried
+            }
         }
 
         public bool Ping()
         {
-            SendRawData(Commands.ConstructPacket("PING"));
+            bool pingSuccess = false; 
 
-            if (pingReceived.WaitOne(TimeSpan.FromSeconds(3)))
+            if (SendRawData(Commands.ConstructPacket("PING")))
             {
-                pingReceived.Reset();
-                return true;
+                if (pingReceived.WaitOne(TimeSpan.FromSeconds(3)))
+                {
+                    pingSuccess = true;
+                }
             }
 
             pingReceived.Reset();
-            return false;
+            return pingSuccess;
         }
 
         /// <summary>
@@ -127,18 +174,29 @@ namespace RFLinkNet
         /// </summary>
         /// <param name="data">Raw data to send</param>
         /// <param name="repeat">How many times to send data</param>
-        public void SendRawData(string data, int repeat = 1)
+        public bool SendRawData(string data, int repeat = 1)
         {
+            bool success = true;
+
             foreach (var i in Enumerable.Range(1, repeat))
             {
-                serialPort.WriteLine(data);
-
-                // Sleep if we're repeating
-                if (repeat > 1)
+                try
                 {
-                    Thread.Sleep(50 + i);
+                    serialPort.WriteLine(data);
+
+                    // Sleep if we're repeating
+                    if (repeat > 1)
+                    {
+                        Thread.Sleep(250 + i);
+                    }
+                }
+                catch (Exception)
+                {
+                    success = false;
                 }
             }
+
+            return success;
         }
 
         public void Close()
@@ -201,39 +259,14 @@ namespace RFLinkNet
         {
             lock (receiveLock)
             {
-                SerialPort sp = (SerialPort)sender;
-                string indata = sp.ReadLine();
+                var indata = string.Empty;
 
                 try
                 {
-                    RFData rf = ProtocolParser.ProcessData(indata);
+                    SerialPort sp = (SerialPort)sender;
+                    indata = sp.ReadLine();
 
-                    if (rf.Protocol == "STATUS")
-                    {
-                        Settings.ProcessStatusResponse(rf);
-                        statusReceived.Set();
-                    }
-                    else if (rf.Protocol.StartsWith("VER"))
-                    {
-                        Settings.ProcessVerResponse(rf);
-                        versionReceived.Set();
-                    }
-                    else if (rf.Protocol == "PONG")
-                    {
-                        pingReceived.Set();
-                    }
-                    else if (libraryStatus == LibraryStatus.Ready)
-                    {
-                        string hashkey = rf.CalculateHash(stateFields);
-
-                        if (!knownDevices.ContainsKey(hashkey))
-                        {
-                            knownDevices.Add(hashkey, rf);
-                        }
-
-                        ReturnRFOutput(rf);
-                    }
-
+                    Task.Run(() => ProcessIncoming(indata));
                 }
                 catch (FormatException)
                 {
@@ -245,6 +278,44 @@ namespace RFLinkNet
                 }
             }
 
+        }
+
+        private void ProcessIncoming(string indata)
+        {
+            try
+            {
+                RFData rf = ProtocolParser.ProcessData(indata);
+
+                if (rf.Protocol == "STATUS")
+                {
+                    Settings.ProcessStatusResponse(rf);
+                    statusReceived.Set();
+                }
+                else if (rf.Protocol.StartsWith("VER"))
+                {
+                    Settings.ProcessVerResponse(rf);
+                    versionReceived.Set();
+                }
+                else if (rf.Protocol == "PONG")
+                {
+                    pingReceived.Set();
+                }
+                else if (libraryStatus == LibraryStatus.Ready)
+                {
+                    string hashkey = rf.CalculateHash(stateFields);
+
+                    if (!knownDevices.ContainsKey(hashkey))
+                    {
+                        knownDevices.Add(hashkey, rf);
+                    }
+
+                    ReturnRFOutput(rf);
+                }
+            }
+            catch(Exception)
+            {
+
+            }
         }
 
         // Public implementation of Dispose pattern callable by consumers.
@@ -263,6 +334,7 @@ namespace RFLinkNet
             if (disposing)
             {
                 serialPort?.Dispose();
+                serialPort = null;
                 statusReceived?.Dispose();
                 versionReceived?.Dispose();
             }
